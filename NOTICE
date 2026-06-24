@@ -1,0 +1,39 @@
+TouchTune
+Copyright (C) 2026 Miatafy
+
+This program is free software: you can redistribute it and/or modify it under
+the terms of the GNU General Public License as published by the Free Software
+Foundation, either version 3 of the License, or (at your option) any later
+version. See the LICENSE file for the full license text.
+
+------------------------------------------------------------------------------
+Attribution
+------------------------------------------------------------------------------
+
+This project builds on prior open-source work by the Mazda Connect (MZD
+Connect / CMU) modding community. The tweak approaches collected here derive
+from and are indebted to:
+
+  * MZD-AIO (All-In-One) and the Trevelopment team
+    https://github.com/Trevelopment/MZD-AIO
+    The original community installer for MZD Connect tweaks (GPL-3.0).
+    ScreenTune is the v74+ continuation of work AIO pioneered on earlier
+    firmware; this repository is a separate codebase, not a fork. The
+    touch-while-driving patch here derives from AIO's `01_touchscreen-i`
+    (the same speed-restriction disable and `Global.AtSpeed` change).
+
+  * CASDK — the Custom Application SDK community
+    The custom-application and boot-hook patterns that ND/CMU tweaks build on.
+
+Because portions of this work derive from GPL-3.0 community code, this
+repository is licensed GPL-3.0. If you redistribute or adapt it, keep this
+NOTICE and the attributions above intact.
+
+------------------------------------------------------------------------------
+Not included
+------------------------------------------------------------------------------
+
+No Mazda firmware, firmware binaries, or other Mazda-owned intellectual
+property is included in this repository. These scripts modify configuration
+and UI files on a vehicle you own; they do not contain or redistribute any
+Mazda code. Target firmware for the published tweaks is v74.00.324A.

@@ -1,0 +1,7 @@
+# Runtime log the installer writes to the USB at apply time
+touchtune.log
+
+# OS / editor cruft
+.DS_Store
+._*
+*.swp
