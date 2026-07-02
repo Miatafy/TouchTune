@@ -8,7 +8,7 @@ TouchTune enables the Mazda Connect touchscreen while the car is moving.
 
 This repo is the shell script that runs on the head unit (the CMU), to remove the factory speed lockout on firmware **v74.00.324A**.
 
-**Full overview, FAQ, and Mazda Connect guides:** [miatafy.com/touchtune](https://miatafy.com/TouchTune)
+**Full overview, FAQ, and Mazda Connect guides:** [miatafy.com/touchtune/](https://miatafy.com/touchtune/)
 
 ## Contents
 
