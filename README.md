@@ -52,6 +52,14 @@ The car runs the install itself from a USB stick. There is no desktop app and no
 4. When the unit restarts, remove the stick. The installer deletes the trigger files on a
    successful run, so a stick left in won't re-apply.
 
+The progress popups are noninteractive from the installer's perspective: its helper
+kills the previous process-wide `jci-dialog`, backgrounds a new `--info --no-cancel`
+message, and continues without waiting for a tap. The native helper has no timeout, so a
+message remains until it is dismissed, replaced, externally terminated, or the CMU
+restarts. The central internal research guide is
+`writeup/cmu-system-popups.md` in the parent workspace; it records the available
+choices, exit statuses, rendering limits, and safe lifetime handling.
+
 On macOS, run `./macos-usb-eject.sh` after copying. It strips the `.DS_Store` and `._*`
 files macOS writes to FAT32 and ejects the stick. The `._*` cleanup matters: a stray
 `._<launcher>.up` sidecar next to the launcher can make the CMU skip the update.
