@@ -2,8 +2,8 @@
 # TouchTune — install-patches.sh
 #
 # Applies every patch under patches/ to this Mazda CMU, backing up each factory file
-# (and nvram value) first. No patches/ folder (or --restore) puts everything back.
-# Runs automatically off the USB stick; the flags below are for off-target/SSH use.
+# (and nvram value) first. With no arguments, the on-car dialog chooses install or
+# uninstall. Runs automatically off the USB stick; flags are for off-target/SSH use.
 # No warranty — see README and LICENSE.
 
 REPO_DIR=$(CDPATH= cd "$(dirname "$0")" && pwd)
@@ -19,10 +19,10 @@ MZD_TEST_MODE="${MZD_TEST_MODE:-0}"
 usage() {
     echo "install-patches.sh — apply TouchTune patches to this Mazda CMU"
     echo
-    echo "With no arguments, applies every patch in patches/ (none = uninstall)."
+    echo "With no arguments on the CMU, prompts to install, repair, or remove TouchTune."
     echo
     echo "Usage:"
-    echo "  install-patches.sh                 apply every patch in patches/ (none = uninstall)"
+    echo "  install-patches.sh                 prompt on-CMU; apply every patch off-target"
     echo "  install-patches.sh ID [ID...]      apply specific patch ids"
     echo "  install-patches.sh --restore       restore factory state (files + nvram)"
     echo "  install-patches.sh --list          list available patch ids"
@@ -36,9 +36,9 @@ resolve_patch() {
 }
 
 # Every patch id under patches/ (sorted, so a NN- prefix orders the apply, e.g.
-# 01-foo, 02-bar). Patches live directly in patches/ — no subfolders. Empty or missing
-# patches/ → nothing → uninstall. Pure glob + parameter expansion: no find/sed, so it
-# runs on the CMU's busybox (1.19.2, which lacks `sed -E`).
+# 01-foo, 02-bar). Patches live directly in patches/ — no subfolders. Pure glob +
+# parameter expansion: no find/sed, so it runs on the CMU's busybox (1.19.2, which
+# lacks `sed -E`).
 list_all_patches() {
     [ -d patches ] || return 0
     for f in patches/*.sh; do
@@ -60,9 +60,6 @@ case "${1:-}" in
     -r|--restore)
         if [ -d /jci ]; then
             [ "$MZD_TEST_MODE" = "1" ] || mount -o rw,remount / 2>/dev/null
-            # Drop the USB triggers so the reboot below can't re-apply on next boot.
-            mount -o rw,remount "$REPO_DIR" 2>/dev/null || true
-            rm -f "$REPO_DIR"/jci-autoupdate "$REPO_DIR"/*.up 2>/dev/null || true
         fi
         mzd_popup "Restoring factory settings...\n\nDo not remove the USB or press any buttons."
         mzd_log "restoring factory state (file + nvram backups)"
@@ -75,21 +72,6 @@ case "${1:-}" in
         exit 0
         ;;
 esac
-
-# No args → apply every patch in patches/.
-if [ "$#" -eq 0 ]; then
-    set -- $(list_all_patches)
-fi
-
-# Empty set = uninstall: the restore-first step below reverts everything and nothing
-# is re-applied. Otherwise install: restore to factory first, then apply.
-if [ "$#" -eq 0 ]; then
-    MZD_MODE="uninstall"
-    MZD_VERB="Uninstalling"
-else
-    MZD_MODE="install"
-    MZD_VERB="Installing"
-fi
 
 # These write to CMU system paths — refuse off-target unless explicitly dry-running.
 if [ ! -d /jci ] && [ "${TOUCHTUNE_ALLOW_OFFTARGET:-0}" != "1" ]; then
@@ -104,18 +86,66 @@ if [ -d /jci ]; then
 fi
 
 if [ -d /jci ]; then
-    # Guard against double execution from a USB remount. The first instance remounts the
-    # USB read-write (just below) for logging; if the USB is already writable, another
-    # instance is running or just finished, so bail before touching anything.
-    if [ "$MZD_TEST_MODE" != "1" ] && touch "$REPO_DIR/.touchtune-probe" 2>/dev/null; then
-        rm -f "$REPO_DIR/.touchtune-probe"
-        mzd_log "USB already writable — another TouchTune instance is running; exiting"
+    # The reusable USB keeps its launcher. An atomic /tmp guard stops overlapping update
+    # scanner launches from opening a second dialog or rerunning the payload.
+    if [ "$MZD_TEST_MODE" != "1" ] && ! mkdir /tmp/touchtune-installer.guard 2>/dev/null; then
+        mzd_log "another TouchTune installer is already running; exiting"
         exit 0
     fi
+    if [ "$MZD_TEST_MODE" != "1" ]; then
+        trap 'rmdir /tmp/touchtune-installer.guard 2>/dev/null || true' 0
+    fi
+fi
+
+MZD_MODE=""
+
+# The USB launcher passes no arguments. On-CMU that means a state-aware action dialog;
+# off-target it retains the useful dry-run behavior of applying all public patches.
+if [ "$#" -eq 0 ]; then
+    if [ -d /jci ] || [ "$MZD_TEST_MODE" = "1" ]; then
+        installed=0
+        mzd_touchtune_installed && installed=1
+        if ! MZD_MODE=$(mzd_choose_action "$installed"); then
+            mzd_log "action selection failed; nothing was changed"
+            exit 1
+        fi
+        if [ "$MZD_MODE" = "cancel" ]; then
+            mzd_log "cancelled before system changes"
+            exit 0
+        fi
+        if [ "$MZD_MODE" = "install" ]; then
+            set -- $(list_all_patches)
+            if [ "$#" -eq 0 ]; then
+                mzd_log "ERROR: no TouchTune patches found on the USB; nothing was changed"
+                mzd_popup "TouchTune files are incomplete.\n\nNothing was changed."
+                exit 1
+            fi
+        fi
+    else
+        set -- $(list_all_patches)
+    fi
+fi
+
+# Explicit patch ids are installs. An empty off-target patch set retains the legacy
+# restore-only behavior; the normal USB uninstall path is the REMOVE choice above.
+if [ -z "$MZD_MODE" ]; then
+    if [ "$#" -eq 0 ]; then
+        MZD_MODE="uninstall"
+    else
+        MZD_MODE="install"
+    fi
+fi
+if [ "$MZD_MODE" = "uninstall" ]; then
+    MZD_VERB="Uninstalling"
+else
+    MZD_VERB="Installing"
+fi
+
+if [ -d /jci ]; then
     mzd_popup "$MZD_VERB TouchTune...\n\nDo not remove the USB or press any buttons."
-    # Remount USB rw, then drop triggers (so a remount can't re-run) and log to the USB.
+    # Remount USB rw for logging. Keep the launcher and update flag so this exact stick
+    # can install, repair, or remove TouchTune again on a later insertion.
     mount -o rw,remount "$REPO_DIR" 2>/dev/null || true
-    rm -f "$REPO_DIR"/jci-autoupdate "$REPO_DIR"/*.up 2>/dev/null || true
     [ "$MZD_TEST_MODE" = "1" ] || exec >>"$REPO_DIR/touchtune.log" 2>&1
     mzd_log "=== install-patches.sh started ==="
     mzd_log "remounting / read-write"

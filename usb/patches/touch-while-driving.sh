@@ -4,7 +4,22 @@
 TARGET="/jci/gui/common/js/Common.js"
 mzd_backup "$TARGET"
 
+ANCHOR='        "Global.AtSpeed" : this._AtSpeedMsgHandler.bind(this),'
+if [ ! -r "$TARGET" ]; then
+    mzd_log "ERROR: $TARGET is not readable; refusing to patch"
+    return 1
+fi
+ANCHOR_COUNT=$(grep -F -c "$ANCHOR" "$TARGET" 2>/dev/null)
+if [ "$ANCHOR_COUNT" != "1" ]; then
+    mzd_log "ERROR: expected one unmodified Global.AtSpeed handler; refusing to patch"
+    return 1
+fi
+
 sed -i 's/        "Global.AtSpeed" : this\._AtSpeedMsgHandler\.bind(this),/        \/\/ MZD_TOUCH_WHILE_DRIVING "Global.AtSpeed" : this._AtSpeedMsgHandler.bind(this),/' "$TARGET"
+if ! grep -q 'MZD_TOUCH_WHILE_DRIVING' "$TARGET"; then
+    mzd_log "ERROR: touch marker missing after edit"
+    return 1
+fi
 
 # The speed-restriction flags live in nvram. Record their factory value (enable =
 # lockout on) so the restore re-enables them; pass the known value so an already-

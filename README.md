@@ -1,6 +1,7 @@
 # TouchTune by Miatafy
 
 [![License: GPL-3.0-or-later](https://img.shields.io/badge/license-GPL--3.0--or--later-blue.svg)](LICENSE)
+[![Release: v1.1.0](https://img.shields.io/badge/release-v1.1.0-brightgreen.svg)](VERSION)
 [![Firmware: v74.00.324A](https://img.shields.io/badge/firmware-v74.00.324A-orange.svg)](#requires-firmware-v7400324a)
 [![Platform: MZD Connect Gen 6](https://img.shields.io/badge/platform-MZD%20Connect%20Gen%206-lightgrey.svg)](#supported-vehicles)
 
@@ -10,24 +11,32 @@ This repo is the shell script that runs on the head unit (the CMU), to remove th
 
 **Full overview, FAQ, and Mazda Connect guides:** [miatafy.com/touchtune/](https://miatafy.com/touchtune/)
 
+[![TouchTune install prompt on Mazda Connect](docs/touchtune-install-prompt.png)](https://miatafy.com/touchtune/install/)
+
+*The native TouchTune installer on Mazda Connect. See the [illustrated install guide and
+FAQ](https://miatafy.com/touchtune/install/).*
+
 ## Contents
 
 - [Requires firmware v74.00.324A](#requires-firmware-v7400324a)
 - [Install from a USB stick](#install-from-a-usb-stick)
 - [How the USB auto-run works](#how-the-usb-auto-run-works)
 - [What ships in patches/ is the install set](#what-ships-in-patches-is-the-install-set)
-- [Uninstall by removing the patches/ folder](#uninstall-by-removing-the-patches-folder)
+- [Uninstall with the same USB](#uninstall-with-the-same-usb)
 - [Layout](#layout)
 - [Built on the MZD-AIO community's work](#built-on-the-mzd-aio-communitys-work)
 - [Risks and limits](#risks-and-limits)
 - [Supported vehicles](#supported-vehicles)
 - [License](#license)
 
-## Requires firmware v74.00.324A
+## Requires firmware v74.00.324 / v74.00.324A
 
-Validated only on Gen 6 Mazda Connect **v74.00.324A**. `install-patches.sh` enforces it:
-it reads `/jci/version.ini` and refuses to run on any other version (v70, v74.00.331,
-Gen 7), leaving the unit untouched. There is no override.
+Validated only on the Gen 6 Mazda Connect **v74.00.324A build family**. Mazda's About
+screen may show `74.00.324` without the package's `A`, especially on EU, 4A, and JP
+units. `install-patches.sh` reads the internal `/jci/version.ini`, accepts the exact
+`74.00.324` base with an optional `A` patch field, and ignores the region/flavor prefix.
+It refuses every other version (v70, v74.00.311, v74.00.331, Gen 7), leaving the unit
+untouched. There is no production override.
 
 Check your version first:
 [how to check your Mazda Connect firmware](https://miatafy.com/mazda-connect/check-firmware/)
@@ -45,20 +54,17 @@ The car runs the install itself from a USB stick. There is no desktop app and no
    stick, using `cp -R`, `rsync`, or drag and drop. The stick's root then holds
    `install-patches.sh`, `lib/`, `patches/`, `jci-autoupdate`, and the `$(…).up` launcher.
 3. Insert the stick with the car on (engine or accessory) and wait. The head unit detects
-   the update flag, runs `install-patches.sh`, and applies every patch in `patches/`
-   (today, just `touch-while-driving`). On-screen popups track progress. When it finishes
-   it flushes the changes, re-enables the watchdog, and restarts the unit to load them. A
-   failed patch stops the run without restarting and writes `touchtune.log` to the stick.
-4. When the unit restarts, remove the stick. The installer deletes the trigger files on a
-   successful run, so a stick left in won't re-apply.
+   the update flag and opens a TouchTune action dialog. A fresh unit offers **INSTALL**
+   or **CANCEL**. If TouchTune is already present, choose **REPAIR**, **REMOVE**, or
+   **CANCEL**. On-screen popups track the selected action. When it finishes, it flushes
+   the changes, re-enables the watchdog, and restarts the unit. A failed patch stops the
+   run without restarting and writes `touchtune.log` to the stick.
+4. Leave the USB connected until Mazda Connect reboots and returns to the home screen,
+   then remove it. The launcher stays on the stick, so the same USB can repair or remove
+   TouchTune later without rebuilding it.
 
-The progress popups are noninteractive from the installer's perspective: its helper
-kills the previous process-wide `jci-dialog`, backgrounds a new `--info --no-cancel`
-message, and continues without waiting for a tap. The native helper has no timeout, so a
-message remains until it is dismissed, replaced, externally terminated, or the CMU
-restarts. The central internal research guide is
-`writeup/cmu-system-popups.md` in the parent workspace; it records the available
-choices, exit statuses, rendering limits, and safe lifetime handling.
+Progress messages stay visible while the installer works; only the initial action dialog
+requires input. Wait for Mazda Connect to restart before removing the USB.
 
 On macOS, run `./macos-usb-eject.sh` after copying. It strips the `.DS_Store` and `._*`
 files macOS writes to FAT32 and ejects the stick. The `._*` cleanup matters: a stray
@@ -88,19 +94,19 @@ Plain-English walkthrough of all three:
 
 ## What ships in patches/ is the install set
 
-`install-patches.sh` applies every `*.sh` directly under `patches/` (no subfolders),
-sorted by filename, with no separate manifest. Today that is
-`patches/touch-while-driving.sh`, a file and nvram edit with nothing to configure. Add or
-remove scripts to change the set; if order matters, prefix the filenames (`01-foo.sh`,
-`02-bar.sh`) so they sort. An empty or missing `patches/` is the uninstall case below.
+When you choose INSTALL or REPAIR, `install-patches.sh` applies every `*.sh` directly
+under `patches/` (no subfolders), sorted by filename, with no separate manifest. Today
+that is `patches/touch-while-driving.sh`, a file and nvram edit with nothing to
+configure. Add or remove scripts to change the set; if order matters, prefix the
+filenames (`01-foo.sh`, `02-bar.sh`) so they sort.
 
-## Uninstall by removing the patches/ folder
+## Uninstall with the same USB
 
-Uninstall from a USB stick too. Build a stick like an install stick, then delete its
-`patches/` folder. `install-patches.sh` restores to factory at the start of every run
-before applying whatever is present, so with nothing to apply it restores every backed-up
-file and nvram value, applies nothing, and restarts. Dropping a single patch from the
-folder removes just that patch on the next install. More on reverting:
+Plug in the same TouchTune USB and choose **REMOVE**. `install-patches.sh` restores every
+backed-up file and nvram value, applies nothing, and restarts. No files need to be deleted
+from the stick, so a prepared USB remains both the installer and the uninstaller. The
+explicit `--restore` command remains available for SSH/off-target maintenance. More on
+reverting:
 [revert / uninstall](https://miatafy.com/support/revert-uninstall/).
 
 **How the backup works.** Before its first edit, each patched file is copied to
@@ -127,7 +133,7 @@ touchtune/
     ├── $(…).up                USB launcher (command-injection filename)
     ├── lib/
     │   └── touchtune-helpers.sh   backup/restore (+nvram), ensure_data_dir, finalize
-    └── patches/               Every *.sh here is applied (sorted); remove the folder to uninstall
+    └── patches/               Every *.sh here is applied (sorted) for INSTALL/REPAIR
         └── touch-while-driving.sh
 ```
 
@@ -156,16 +162,19 @@ attribution is in [`NOTICE`](NOTICE); background on the lineage:
   shipped for years, and current cars ship always-on touchscreens. Know what it does and
   keep your eyes on the road. More on the trade-off:
   [safety FAQ](https://miatafy.com/screentune/safety-faq/).
-- **Firmware-gated to v74.00.324A.** The installer refuses any other version, as above.
+- **Firmware-gated to the v74.00.324A build family.** The About screen may omit the `A`;
+  the installer accepts only the exact `.324` base with an optional `A` patch field and
+  refuses every other build, as above.
 - **Don't disable core services.** `jciVBS`, `jciMMUI`, `audio_manager`, `jciTds`, and
   `jciBootManager` are load-bearing; disabling them breaks the HMI. No patch here touches
   them, and you shouldn't add one that does.
 
 ## Supported vehicles
 
-The CMU is shared across Gen 6 Mazda Connect, so TouchTune runs on any v74.00.324A unit. It
-is validated on the ND MX-5 today; other Gen 6 cars (Mazda3, CX-5, and the rest) run the
-same unit with validation pending. Full matrix:
+The CMU is shared across Gen 6 Mazda Connect, so TouchTune is eligible on `.324` units
+across region labels, including About screens that omit the `A`. It is bench-validated
+on a North American ND MX-5 CMU today; other regions and Gen 6 cars (Mazda3, CX-5, and
+the rest) use the same build family with validation pending. Full matrix:
 [supported vehicles](https://miatafy.com/compatibility/supported-vehicles/).
 
 ## License

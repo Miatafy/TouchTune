@@ -14,11 +14,74 @@ MZD_JCI_SCRIPTS="${MZD_JCI_SCRIPTS:-/jci/scripts}"
 # nv-config sysfs key/value store (persists across reboots). Override for off-target.
 MZD_NVRAM_DIR="${MZD_NVRAM_DIR:-/sys/class/nvram/nv-config}"
 # Only firmware these patches were validated on; the installer refuses any other.
+MZD_SUPPORTED_BASE_FW="74.00.324"
 MZD_SUPPORTED_FW="74.00.324A"
 MZD_VERSION_INI="/jci/version.ini"
 
 # mzd_log MESSAGE — print a tagged progress line.
 mzd_log() { echo "[touchtune] $1"; }
+
+# mzd_touchtune_installed — true when TouchTune's public patch marker is present.
+# Using the patch's own marker keeps the standalone installer self-contained.
+mzd_touchtune_installed() {
+    local target="/jci/gui/common/js/Common.js"
+    [ -r "$target" ] && grep -q 'MZD_TOUCH_WHILE_DRIVING' "$target"
+}
+
+# mzd_choose_action INSTALLED — echo install, uninstall, or cancel from a synchronous
+# CMU dialog. Fresh units get a simple confirmation; installed units get the same
+# repair/remove/cancel choice used by ScreenTune. Test mode accepts an action through
+# TOUCHTUNE_TEST_ACTION and never opens a real dialog.
+mzd_choose_action() {
+    local installed="${1:-0}"
+    local code
+
+    if [ "${MZD_TEST_MODE:-0}" = "1" ]; then
+        case "${TOUCHTUNE_TEST_ACTION:-install}" in
+            install|uninstall|cancel) printf '%s\n' "${TOUCHTUNE_TEST_ACTION:-install}" ;;
+            *) echo "ERROR: invalid TOUCHTUNE_TEST_ACTION" >&2; return 1 ;;
+        esac
+        return 0
+    fi
+
+    if [ ! -x /jci/tools/jci-dialog ]; then
+        echo "ERROR: /jci/tools/jci-dialog not found; refusing to choose an action" >&2
+        return 1
+    fi
+
+    killall -q jci-dialog 2>/dev/null || true
+    if [ "$installed" = "1" ]; then
+        /jci/tools/jci-dialog \
+            --3-button-dialog \
+            --title="TOUCHTUNE" \
+            --text="TouchTune is installed.\nChoose an action." \
+            --ok-label="REPAIR" \
+            --cancel-label="REMOVE" \
+            --button3-label="CANCEL" \
+            >/dev/null 2>&1
+        code=$?
+        case "$code" in
+            0) echo install ;;
+            1) echo uninstall ;;
+            2) echo cancel ;;
+            *) echo "ERROR: TouchTune action dialog failed with $code" >&2; return 1 ;;
+        esac
+    else
+        /jci/tools/jci-dialog \
+            --confirm \
+            --title="TOUCHTUNE" \
+            --text="Install TouchTune?" \
+            --ok-label="INSTALL" \
+            --cancel-label="CANCEL" \
+            >/dev/null 2>&1
+        code=$?
+        case "$code" in
+            0) echo install ;;
+            1) echo cancel ;;
+            *) echo "ERROR: TouchTune action dialog failed with $code" >&2; return 1 ;;
+        esac
+    fi
+}
 
 # mzd_popup TEXT — fullscreen dialog on the head unit (no-op off-CMU). Replaces any
 # previous popup.
@@ -31,14 +94,22 @@ mzd_popup() {
 }
 
 # mzd_current_firmware — echo the CMU firmware (e.g. 74.00.324A) from version.ini, or
-# nothing if unreadable. JCI_SW_VER="..._74.00.324" + JCI_SW_VER_PATCH="A" -> 74.00.324A.
+# nothing if unreadable. Region/flavor text precedes the final underscore and is not
+# part of the build number. Some regional files omit the patch field, and some tools
+# include it in JCI_SW_VER, so avoid appending the same suffix twice.
 mzd_current_firmware() {
     [ -r "$MZD_VERSION_INI" ] || return 0
     local ver patch
-    ver=$(grep '^JCI_SW_VER=' "$MZD_VERSION_INI" | cut -d'"' -f2)
+    ver=$(grep '^JCI_SW_VER=' "$MZD_VERSION_INI" | cut -d'"' -f2 | tr -d '\r' | tr 'a-z' 'A-Z')
     ver=${ver##*_}
-    patch=$(grep '^JCI_SW_VER_PATCH=' "$MZD_VERSION_INI" | cut -d'"' -f2)
-    [ -n "$ver" ] && printf '%s%s\n' "$ver" "$patch"
+    patch=$(grep '^JCI_SW_VER_PATCH=' "$MZD_VERSION_INI" | cut -d'"' -f2 | tr -d '\r' | tr 'a-z' 'A-Z')
+    if [ -n "$ver" ] && [ -n "$patch" ]; then
+        case "$ver" in
+            *"$patch") ;;
+            *) ver="${ver}${patch}" ;;
+        esac
+    fi
+    [ -n "$ver" ] && printf '%s\n' "$ver"
 }
 
 # mzd_require_firmware — non-zero (and on-screen warning) unless on the supported fw.
@@ -50,11 +121,14 @@ mzd_require_firmware() {
         mzd_popup "Could not read firmware version.\n\nTouchTune only runs on $MZD_SUPPORTED_FW.\nNothing was changed."
         return 1
     fi
-    if [ "$fw" != "$MZD_SUPPORTED_FW" ]; then
-        mzd_log "ERROR: firmware $fw is not supported — TouchTune targets $MZD_SUPPORTED_FW only"
-        mzd_popup "Unsupported firmware.\n\nThis CMU is on $fw.\nTouchTune only supports $MZD_SUPPORTED_FW.\nNothing was changed."
-        return 1
-    fi
+    case "$fw" in
+        "$MZD_SUPPORTED_BASE_FW"|"$MZD_SUPPORTED_FW") ;;
+        *)
+            mzd_log "ERROR: firmware $fw is not supported — TouchTune targets $MZD_SUPPORTED_FW only"
+            mzd_popup "Unsupported firmware.\n\nThis CMU is on $fw.\nTouchTune only supports $MZD_SUPPORTED_FW.\nNothing was changed."
+            return 1
+            ;;
+    esac
     mzd_log "firmware $fw — supported"
     return 0
 }
