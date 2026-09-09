@@ -1,210 +1,224 @@
 #!/bin/sh
-# TouchTune — install-patches.sh
-#
-# Applies every patch under patches/ to this Mazda CMU, backing up each factory file
-# (and nvram value) first. With no arguments, the on-car dialog chooses install or
-# uninstall. Runs automatically off the USB stick; flags are for off-target/SSH use.
-# No warranty — see README and LICENSE.
+# Install or remove TouchTune on Mazda Connect 74.00.324 and 74.00.324A.
+# TouchTune has no warranty. See LICENSE, NOTICE, and SOURCE.txt on this USB.
 
-REPO_DIR=$(CDPATH= cd "$(dirname "$0")" && pwd)
-cd "$REPO_DIR"
-
-# Test mode (set by the Docker CMU test harness) skips the operations that can't run in
-# a container: the double-execution guard, the / remount, the USB-log redirect, popups,
-# and the final reboot. There is no production override — the real install never sets it.
+REPO_DIR=$(CDPATH='' cd "$(dirname "$0")" && pwd) || exit 1
+cd "$REPO_DIR" || exit 1
 MZD_TEST_MODE="${MZD_TEST_MODE:-0}"
+TOUCHTUNE_LOG_ACTIVE=0
+TOUCHTUNE_GUARD_CREATED=0
+TOUCHTUNE_HELPER_LOADED=0
+TOUCHTUNE_FINALIZE_NEEDED=0
 
-. "$REPO_DIR/lib/touchtune-helpers.sh"
+# Used on both normal completion and catchable interruptions. Remove temporary
+# files while root is writable, then restore the mount and watchdog.
+touchtune_cleanup() {
+    local failures=0
+    if [ "$MZD_TRANSACTION_ACTIVE" = 1 ]; then
+        rollback_touch_transaction || failures=1
+    fi
+    if [ -n "$MZD_COMMON_STAGE" ]; then
+        if mzd_remove_stage_file "$MZD_COMMON_STAGE"; then MZD_COMMON_STAGE=; else failures=1; fi
+    fi
+    if [ -n "$MZD_BACKUP_STAGE" ]; then
+        if mzd_discard_backup_stage "$MZD_BACKUP_STAGE"; then MZD_BACKUP_STAGE=; else failures=1; fi
+    fi
+    if [ "$TOUCHTUNE_FINALIZE_NEEDED" = 1 ]; then
+        if mzd_finalize; then TOUCHTUNE_FINALIZE_NEEDED=0; else failures=1; fi
+    fi
+    return "$failures"
+}
+
+touchtune_exit() {
+    status=$?
+    # Finish catchable interruptions once; SIGKILL and power loss cannot run this.
+    trap - 0
+    trap '' HUP INT TERM
+    if [ "$TOUCHTUNE_HELPER_LOADED" = 1 ]; then
+        touchtune_cleanup || { [ "$status" -ne 0 ] || status=1; }
+    fi
+    [ "$TOUCHTUNE_LOG_ACTIVE" = 0 ] || sync 2>/dev/null || true
+    [ "$TOUCHTUNE_GUARD_CREATED" = 0 ] || rmdir /tmp/touchtune-installer.guard 2>/dev/null || true
+    exit "$status"
+}
+trap touchtune_exit 0
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+bootstrap_log() { printf '%s\n' "[touchtune] $1" >&2; }
+
+bootstrap_popup() {
+    [ "$MZD_TEST_MODE" = 1 ] && return 0
+    [ -x /jci/tools/jci-dialog ] || return 0
+    killall -q jci-dialog 2>/dev/null || true
+    /jci/tools/jci-dialog --info --title="TouchTune" --text="$1" \
+        --no-cancel >/dev/null 2>&1 &
+}
+
+bootstrap_sha256() {
+    local command output value
+    command=/usr/bin/openssl
+    [ -x "$command" ] || command=$(command -v openssl 2>/dev/null || true)
+    [ -n "$command" ] && [ -x "$command" ] || return 1
+    output=$("$command" dgst -sha256 "$1" 2>/dev/null) || return 1
+    value=${output##* }
+    [ "${#value}" -eq 64 ] || return 1
+    case "$value" in *[!0-9a-fA-F]*) return 1 ;; esac
+    printf '%s\n' "$value" | tr 'A-F' 'a-f'
+}
+
+bootstrap_verify_helper() {
+    local manifest="$REPO_DIR/PAYLOAD.SHA256" helper="$REPO_DIR/lib/touchtune-helpers.sh"
+    local digest rel extra expected='' count=0 actual
+    [ -f "$manifest" ] && [ ! -L "$manifest" ] && [ -r "$manifest" ] || return 1
+    [ -f "$helper" ] && [ ! -L "$helper" ] && [ -r "$helper" ] || return 1
+    while read -r digest rel extra; do
+        [ "$rel" = lib/touchtune-helpers.sh ] || continue
+        [ -z "$extra" ] || return 1
+        expected=$digest
+        count=$((count + 1))
+    done < "$manifest"
+    [ "$count" -eq 1 ] || return 1
+    [ "${#expected}" -eq 64 ] || return 1
+    case "$expected" in *[!0-9a-fA-F]*) return 1 ;; esac
+    actual=$(bootstrap_sha256 "$helper") || return 1
+    [ "$actual" = "$expected" ]
+}
 
 usage() {
-    echo "install-patches.sh — apply TouchTune patches to this Mazda CMU"
-    echo
-    echo "With no arguments on the CMU, prompts to install, repair, or remove TouchTune."
+    echo "install-patches.sh: install or remove TouchTune"
     echo
     echo "Usage:"
-    echo "  install-patches.sh                 prompt on-CMU; apply every patch off-target"
-    echo "  install-patches.sh ID [ID...]      apply specific patch ids"
-    echo "  install-patches.sh --restore       restore factory state (files + nvram)"
-    echo "  install-patches.sh --list          list available patch ids"
-    echo "  install-patches.sh --help          this help"
-}
-
-# Resolve a patch id (e.g. touch-while-driving) to its script path under patches/.
-resolve_patch() {
-    [ -f "patches/$1.sh" ] && { echo "patches/$1.sh"; return 0; }
-    return 1
-}
-
-# Every patch id under patches/ (sorted, so a NN- prefix orders the apply, e.g.
-# 01-foo, 02-bar). Patches live directly in patches/ — no subfolders. Pure glob +
-# parameter expansion: no find/sed, so it runs on the CMU's busybox (1.19.2, which
-# lacks `sed -E`).
-list_all_patches() {
-    [ -d patches ] || return 0
-    for f in patches/*.sh; do
-        [ -f "$f" ] || continue   # unmatched glob stays literal — skip it
-        f=${f##*/}                # strip the patches/ prefix
-        printf '%s\n' "${f%.sh}"  # strip the .sh suffix
-    done | sort
+    echo "  install-patches.sh                  show the on-CMU action dialog"
+    echo "  install-patches.sh touch-while-driving"
+    echo "  install-patches.sh --restore"
+    echo "  install-patches.sh --list"
+    echo "  install-patches.sh --help"
 }
 
 case "${1:-}" in
-    -h|--help)
-        usage
-        exit 0
-        ;;
-    -l|--list)
-        list_all_patches
-        exit 0
-        ;;
+    -h|--help) usage; exit 0 ;;
+    -l|--list) echo touch-while-driving; exit 0 ;;
     -r|--restore)
-        if [ -d /jci ]; then
-            [ "$MZD_TEST_MODE" = "1" ] || mount -o rw,remount / 2>/dev/null
-        fi
-        mzd_popup "Restoring factory settings...\n\nDo not remove the USB or press any buttons."
-        mzd_log "restoring factory state (file + nvram backups)"
-        mzd_restore_all
-        mzd_restore_nvram
-        mzd_finalize
-        mzd_log "done — restarting to load the restored state"
-        mzd_popup "Factory settings restored.\n\nRemove the USB. Restarting..."
-        mzd_reboot
-        exit 0
+        [ "$#" -eq 1 ] || { usage >&2; exit 2; }
+        MZD_MODE=uninstall
+        ;;
+    '') MZD_MODE=choose ;;
+    touch-while-driving)
+        [ "$#" -eq 1 ] || { usage >&2; exit 2; }
+        MZD_MODE=install
+        ;;
+    *)
+        echo "ERROR: unknown TouchTune action or patch: $1" >&2
+        usage >&2
+        exit 2
         ;;
 esac
 
-# These write to CMU system paths — refuse off-target unless explicitly dry-running.
-if [ ! -d /jci ] && [ "${TOUCHTUNE_ALLOW_OFFTARGET:-0}" != "1" ]; then
-    echo "ERROR: /jci not found — this runs on the Mazda CMU via the USB installer, not on your computer." >&2
-    echo "To dry-run off-target (no CMU present), set TOUCHTUNE_ALLOW_OFFTARGET=1." >&2
+if [ "$MZD_TEST_MODE" != "1" ]; then
+    if [ ! -d /jci ]; then
+        echo "ERROR: /jci not found; this installer runs on a Mazda CMU." >&2
+        exit 1
+    fi
+    # Open the USB log before compatibility checks. Keep diagnostics on the
+    # system console when the volume cannot be remounted or opened for writing.
+    mount -o rw,remount "$REPO_DIR" 2>/dev/null || true
+    if : >> "$REPO_DIR/touchtune.log" 2>/dev/null; then
+        exec >> "$REPO_DIR/touchtune.log" 2>&1
+        TOUCHTUNE_LOG_ACTIVE=1
+    else
+        bootstrap_log "WARNING: USB log is not writable; continuing with console logging"
+    fi
+fi
+
+bootstrap_log "=== TouchTune installer started ==="
+
+if ! bootstrap_verify_helper; then
+    bootstrap_log "ERROR: TouchTune helper validation failed before execution"
+    bootstrap_popup "TouchTune USB validation failed.\n\nNothing was changed.\nKeep the USB and review touchtune.log."
     exit 1
 fi
 
-# Refuse any firmware but the validated one, before touching anything.
-if [ -d /jci ]; then
-    mzd_require_firmware || exit 1
+. "$REPO_DIR/lib/touchtune-helpers.sh" || {
+    bootstrap_log "ERROR: verified TouchTune helper could not be loaded"
+    bootstrap_popup "TouchTune could not load its verified helper.\n\nNothing was changed.\nKeep the USB and review touchtune.log."
+    exit 1
+}
+
+TOUCHTUNE_HELPER_LOADED=1
+TOUCHTUNE_FINALIZE_NEEDED=1
+
+if ! mzd_verify_payload "$REPO_DIR"; then
+    mzd_popup "TouchTune USB validation failed.\n\nNothing was changed.\nKeep the USB and review touchtune.log."
+    exit 1
 fi
 
-if [ -d /jci ]; then
-    # The reusable USB keeps its launcher. An atomic /tmp guard stops overlapping update
-    # scanner launches from opening a second dialog or rerunning the payload.
-    if [ "$MZD_TEST_MODE" != "1" ] && ! mkdir /tmp/touchtune-installer.guard 2>/dev/null; then
+TOUCHTUNE_VERSION=$(tr -d '\r\n' < "$REPO_DIR/VERSION") || exit 1
+case "$TOUCHTUNE_VERSION" in ''|*[!0-9A-Za-z.-]*) mzd_log "ERROR: invalid TouchTune version"; exit 1 ;; esac
+mzd_log "TouchTune $TOUCHTUNE_VERSION"
+
+if ! mzd_require_firmware; then
+    exit 1
+fi
+
+if [ "$MZD_TEST_MODE" != "1" ]; then
+    if ! mkdir /tmp/touchtune-installer.guard 2>/dev/null; then
         mzd_log "another TouchTune installer is already running; exiting"
         exit 0
     fi
-    if [ "$MZD_TEST_MODE" != "1" ]; then
-        trap 'rmdir /tmp/touchtune-installer.guard 2>/dev/null || true' 0
+    TOUCHTUNE_GUARD_CREATED=1
+fi
+
+if [ "$MZD_MODE" = choose ]; then
+    installed=0
+    mzd_touchtune_installed && installed=1
+    if ! MZD_MODE=$(mzd_choose_action "$installed"); then
+        mzd_log "ERROR: action dialog failed; nothing was changed"
+        mzd_popup "TouchTune could not read your selection.\n\nNothing was changed.\nKeep the USB for touchtune.log."
+        exit 1
     fi
 fi
 
-MZD_MODE=""
-
-# The USB launcher passes no arguments. On-CMU that means a state-aware action dialog;
-# off-target it retains the useful dry-run behavior of applying all public patches.
-if [ "$#" -eq 0 ]; then
-    if [ -d /jci ] || [ "$MZD_TEST_MODE" = "1" ]; then
-        installed=0
-        mzd_touchtune_installed && installed=1
-        if ! MZD_MODE=$(mzd_choose_action "$installed"); then
-            mzd_log "action selection failed; nothing was changed"
-            exit 1
-        fi
-        if [ "$MZD_MODE" = "cancel" ]; then
-            mzd_log "cancelled before system changes"
-            exit 0
-        fi
-        if [ "$MZD_MODE" = "install" ]; then
-            set -- $(list_all_patches)
-            if [ "$#" -eq 0 ]; then
-                mzd_log "ERROR: no TouchTune patches found on the USB; nothing was changed"
-                mzd_popup "TouchTune files are incomplete.\n\nNothing was changed."
-                exit 1
-            fi
-        fi
-    else
-        set -- $(list_all_patches)
-    fi
+if [ "$MZD_MODE" = cancel ]; then
+    mzd_log "cancelled before system changes"
+    exit 0
 fi
 
-# Explicit patch ids are installs. An empty off-target patch set retains the legacy
-# restore-only behavior; the normal USB uninstall path is the REMOVE choice above.
-if [ -z "$MZD_MODE" ]; then
-    if [ "$#" -eq 0 ]; then
-        MZD_MODE="uninstall"
-    else
-        MZD_MODE="install"
-    fi
+case "$MZD_MODE" in
+    install) verb=Installing ;;
+    uninstall) verb=Removing ;;
+    *) mzd_log "ERROR: invalid action state"; exit 1 ;;
+esac
+mzd_popup "$verb TouchTune...\n\nDo not remove the USB or press any buttons."
+
+patch_status=0
+. "$REPO_DIR/patches/touch-while-driving.sh" || patch_status=$?
+
+finalize_status=0
+touchtune_cleanup || finalize_status=$?
+
+if [ "$finalize_status" -ne 0 ]; then
+    mzd_log "final safety checks failed; not restarting"
+    mzd_popup "TouchTune could not verify the final CMU state.\n\nTouchTune will not restart the CMU.\nKeep the USB and review touchtune.log."
+    exit "$finalize_status"
 fi
-if [ "$MZD_MODE" = "uninstall" ]; then
-    MZD_VERB="Uninstalling"
+if [ "$patch_status" -ne 0 ]; then
+    mzd_log "installation transaction failed; not restarting"
+    mzd_popup "TouchTune could not complete the requested change.\n\nTouchTune will not restart the CMU.\nKeep the USB and review touchtune.log."
+    exit "$patch_status"
+fi
+
+if [ "$MZD_MODE" = uninstall ]; then
+    mzd_log "TouchTune removal verified; requesting Mazda SafeReboot"
+    mzd_popup "TouchTune was removed and verified.\n\nRemove the USB. Restarting..."
 else
-    MZD_VERB="Installing"
+    mzd_log "TouchTune installation verified; requesting Mazda SafeReboot"
+    mzd_popup "TouchTune was installed and verified.\n\nRemove the USB. Restarting..."
 fi
 
-if [ -d /jci ]; then
-    mzd_popup "$MZD_VERB TouchTune...\n\nDo not remove the USB or press any buttons."
-    # Remount USB rw for logging. Keep the launcher and update flag so this exact stick
-    # can install, repair, or remove TouchTune again on a later insertion.
-    mount -o rw,remount "$REPO_DIR" 2>/dev/null || true
-    [ "$MZD_TEST_MODE" = "1" ] || exec >>"$REPO_DIR/touchtune.log" 2>&1
-    mzd_log "=== install-patches.sh started ==="
-    mzd_log "remounting / read-write"
-    [ "$MZD_TEST_MODE" = "1" ] || mount -o rw,remount /
-    # Disable the watchdog so a long apply can't trip a reboot.
-    [ -e "/sys/class/gpio/Watchdog Disable/value" ] && \
-        echo 1 > "/sys/class/gpio/Watchdog Disable/value" 2>/dev/null || true
+if ! mzd_reboot; then
+    mzd_popup "TouchTune finished, but the restart could not be requested.\n\nRestart Mazda Connect normally.\nKeep the USB for touchtune.log."
+    exit 1
 fi
-
-# /data is a runtime symlink; make its target real before backing anything up.
-mzd_ensure_data_dir
-mzd_init
-
-# Restore to factory first so each run starts clean and dropped patches revert.
-if [ -d "$MZD_BACKUP_DIR" ]; then
-    mzd_log "restoring factory state"
-    mzd_restore_all
-fi
-mzd_restore_nvram
-
-failures=0
-applied=0
-total=$#
-for id in "$@"; do
-    if ! script=$(resolve_patch "$id"); then
-        mzd_log "SKIP: unknown patch '$id'"
-        failures=$((failures + 1))
-        continue
-    fi
-    applied=$((applied + 1))
-    mzd_log "applying ($applied/$total): $id"
-    # Run each patch in a subshell so one can't leak vars into (or abort) the next.
-    if ( . "$script" ); then
-        mzd_log "ok: $id"
-    else
-        mzd_log "FAILED: $id (exit $?)"
-        failures=$((failures + 1))
-    fi
-done
-
-if [ "$MZD_MODE" = "uninstall" ]; then
-    mzd_log "finished: uninstall — factory state restored"
-else
-    mzd_log "finished: $applied applied, $failures failure(s)"
-fi
-# Return to a safe state: flush, re-enable watchdog, remount / read-only.
-mzd_finalize
-if [ "$failures" -eq 0 ]; then
-    if [ "$MZD_MODE" = "uninstall" ]; then
-        mzd_log "restarting to load factory state"
-        mzd_popup "TouchTune uninstalled.\n\nRemove the USB."
-    else
-        mzd_log "restarting to load the changes"
-        mzd_popup "TouchTune installed.\n\nRemove the USB."
-    fi
-    mzd_reboot
-else
-    # Stay in the safe state but don't reboot, so the error/log stays visible.
-    mzd_log "finished with errors — not restarting; see touchtune.log on the USB"
-    mzd_popup "TouchTune finished with $failures error(s).\n\nSee touchtune.log on the USB."
-fi
-[ "$failures" -eq 0 ]
+exit 0

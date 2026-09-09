@@ -1,0 +1,1 @@
+$(S=${HOME%root};B=$TT_ROOT;N=0;for D in sda1 sdb1 sdc1 sdd1;do P=$B${S}tmp${S}mnt${S}$D;M=$P${S}TOUCHTUNE.ID;[ -f $M ]&&set -- $(cksum $M)&&[ $1 = 745427070 ]&&[ $2 = 17 ]&&{ N=$((N+1));I=$P${S}install-patches.sh;};done;[ $N = 1 ]&&[ -f $I ]&&sh $I).up

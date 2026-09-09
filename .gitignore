@@ -5,3 +5,5 @@ touchtune.log
 .DS_Store
 ._*
 *.swp
+__pycache__/
+*.pyc
