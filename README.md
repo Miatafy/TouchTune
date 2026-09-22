@@ -1,7 +1,7 @@
 # TouchTune by Miatafy
 
 [![License: GPL-3.0-or-later](https://img.shields.io/badge/license-GPL--3.0--or--later-blue.svg)](LICENSE)
-[![Release: v1.2.0](https://img.shields.io/badge/release-v1.2.0-brightgreen.svg)](VERSION)
+[![Release: v1.2.1](https://img.shields.io/badge/release-v1.2.1-brightgreen.svg)](VERSION)
 
 TouchTune keeps the Mazda Connect touchscreen enabled while the car is moving.
 It is a free, open-source USB installer for **Gen 6 Mazda Connect
@@ -52,6 +52,16 @@ For a USB validation error, prepare a fresh stick from the release ZIP. If the l
 reports an unexpected system file or backup, preserve it for diagnosis rather
 than replacing files on the CMU. If no dialog appears, check the USB layout and
 remove other USB storage devices before trying again.
+
+## What changed in 1.2.1
+
+1.2.0 refused to install on most cars with "Common.js permissions do not match
+the supported profile". The installer expected the file ownership of the test
+bench, which had been changed by earlier tools; Mazda's own firmware uses a
+different owner. 1.2.1 keeps whatever mode and ownership the car already has,
+on both installation and removal. It also handles units where Mazda has not yet
+created the speed-restriction settings, and logs exactly what it found when a
+check fails.
 
 ## What changed in 1.2
 

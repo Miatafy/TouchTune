@@ -38,6 +38,13 @@ assert_eq() {
     [ "$1" = "$2" ] || fail "$3 (wanted '$2', got '$1')"
 }
 
+assert_attrs() {
+    local path="$1" label="$2"
+    assert_eq "$(mode_file "$path")" "$FIXTURE_FILE_MODE" "$label mode"
+    assert_eq "$(uid_file "$path")" "$FIXTURE_FILE_UID" "$label uid"
+    assert_eq "$(gid_file "$path")" "$FIXTURE_FILE_GID" "$label gid"
+}
+
 assert_file_state() {
     local wanted="$1" path="$2" actual
     actual=$(sha256_file "$path")
@@ -122,9 +129,6 @@ run_installer() {
     TOUCHTUNE_TEST_STOCK_SHA256="$FIXTURE_STOCK_SHA" \
     TOUCHTUNE_TEST_PATCHED_SHA256="$FIXTURE_PATCHED_SHA" \
     TOUCHTUNE_TEST_STOCK_BYTES="$FIXTURE_STOCK_BYTES" \
-    TOUCHTUNE_TEST_FILE_MODE="$FIXTURE_FILE_MODE" \
-    TOUCHTUNE_TEST_FILE_UID="$FIXTURE_FILE_UID" \
-    TOUCHTUNE_TEST_FILE_GID="$FIXTURE_FILE_GID" \
     TOUCHTUNE_FAULT="$fault" \
         sh "$FIXTURE_USB/install-patches.sh" > "$FIXTURE_LOG" 2>&1 || status=$?
     return "$status"
@@ -135,6 +139,7 @@ nvram_value() { tr -d '\r\n' < "$FIXTURE_ROOT/sys/class/nvram/nv-config/keys/$1"
 make_fixture lifecycle
 run_installer install || fail "first install failed: $(cat "$FIXTURE_LOG")"
 assert_file_state patched "$FIXTURE_COMMON"
+assert_attrs "$FIXTURE_COMMON" "installed Common.js"
 assert_eq "$(nvram_value bus_bcm_speed_restriction)" disable "bus NVRAM after install"
 assert_eq "$(nvram_value lvds_speed_restriction)" disable "LVDS NVRAM after install"
 [ ! -e "$FIXTURE_ROOT/data/touchtune/state" ] || fail "install created diagnostic state"
@@ -148,13 +153,14 @@ assert_eq "$(sha256_file "$FIXTURE_ROOT/data/touchtune/backups/common-js/metadat
 assert_eq "$(sha256_file "$FIXTURE_ROOT/data/touchtune/backups/common-js/metadata.sha256")" "$BACKUP_META_DIGEST_SHA" "backup metadata digest changed on repair"
 run_installer uninstall || fail "uninstall failed: $(cat "$FIXTURE_LOG")"
 assert_file_state stock "$FIXTURE_COMMON"
+assert_attrs "$FIXTURE_COMMON" "restored Common.js"
 assert_eq "$(nvram_value bus_bcm_speed_restriction)" enable "bus NVRAM after uninstall"
 assert_eq "$(nvram_value lvds_speed_restriction)" enable "LVDS NVRAM after uninstall"
 [ ! -e "$FIXTURE_ROOT/data/touchtune/state" ] || fail "uninstall created diagnostic state"
 run_installer uninstall || fail "repeat uninstall failed: $(cat "$FIXTURE_LOG")"
 assert_file_state stock "$FIXTURE_COMMON"
-assert_eq "$(wc -l < "$FIXTURE_ROOT/nvram-writes" | tr -d '[:space:]')" 4 "repeat actions rewrote NVRAM"
-pass "repeat actions preserve the backup and avoid unnecessary NVRAM writes"
+assert_eq "$(wc -l < "$FIXTURE_ROOT/nvram-writes" | tr -d '[:space:]')" 8 "repeat actions skipped NVRAM setters"
+pass "repeat actions preserve the backup and require successful NVRAM setters"
 
 make_fixture existing_nvram
 printf '%s\n' disable > "$FIXTURE_ROOT/sys/class/nvram/nv-config/keys/bus_bcm_speed_restriction"
@@ -165,6 +171,66 @@ run_installer uninstall || fail "uninstall over an existing NVRAM configuration 
 assert_eq "$(nvram_value bus_bcm_speed_restriction)" disable "bus entry baseline after uninstall"
 assert_eq "$(nvram_value lvds_speed_restriction)" disable "LVDS entry baseline after uninstall"
 pass "removal restores the NVRAM values present before a stock first install"
+
+# Mazda ships the GUI tree with a different owner and mode than the bench had.
+# Whatever the live file has must survive install and removal unchanged.
+make_fixture inherited_attrs
+chmod 0664 "$FIXTURE_COMMON"
+FIXTURE_FILE_MODE=$(mode_file "$FIXTURE_COMMON")
+run_installer install || fail "install with an unusual file mode failed: $(cat "$FIXTURE_LOG")"
+assert_file_state patched "$FIXTURE_COMMON"
+assert_attrs "$FIXTURE_COMMON" "installed Common.js with inherited mode"
+grep -q "mode=664 uid=$FIXTURE_FILE_UID gid=$FIXTURE_FILE_GID; replacements will keep" "$FIXTURE_LOG" || fail "recorded attributes were not logged"
+if grep -q 'permissions do not match' "$FIXTURE_LOG"; then fail "profile permission check still exists"; fi
+run_installer uninstall || fail "removal with an unusual file mode failed: $(cat "$FIXTURE_LOG")"
+assert_file_state stock "$FIXTURE_COMMON"
+assert_attrs "$FIXTURE_COMMON" "restored Common.js with inherited mode"
+pass "Common.js mode and ownership are inherited from the live file, never asserted"
+
+# Some 74.00.324A units have never run the speed-restriction setters, so the
+# NVRAM keys do not exist until Mazda's own scripts create them.
+make_fixture nvram_keys_absent
+rm "$FIXTURE_ROOT/sys/class/nvram/nv-config/keys/bus_bcm_speed_restriction" \
+    "$FIXTURE_ROOT/sys/class/nvram/nv-config/keys/lvds_speed_restriction"
+run_installer install || fail "install with absent NVRAM keys failed: $(cat "$FIXTURE_LOG")"
+assert_file_state patched "$FIXTURE_COMMON"
+assert_eq "$(nvram_value bus_bcm_speed_restriction)" disable "bus key created and set on install"
+assert_eq "$(nvram_value lvds_speed_restriction)" disable "LVDS key created and set on install"
+grep -q 'bus_bcm_speed_restriction does not exist yet' "$FIXTURE_LOG" || fail "absent bus key was not explained"
+grep -q 'lvds_speed_restriction does not exist yet' "$FIXTURE_LOG" || fail "absent LVDS key was not explained"
+grep -q '^nvram_bus_bcm_speed_restriction=enable$' "$FIXTURE_ROOT/data/touchtune/backups/common-js/metadata" || fail "factory entry value was not recorded"
+run_installer uninstall || fail "removal after absent-key install failed: $(cat "$FIXTURE_LOG")"
+assert_file_state stock "$FIXTURE_COMMON"
+assert_eq "$(nvram_value bus_bcm_speed_restriction)" enable "bus factory value after removal"
+assert_eq "$(nvram_value lvds_speed_restriction)" enable "LVDS factory value after removal"
+pass "absent NVRAM keys are treated as factory values and created by the stock setters"
+
+make_fixture nvram_keys_absent_setter_failure
+rm "$FIXTURE_ROOT/sys/class/nvram/nv-config/keys/bus_bcm_speed_restriction" \
+    "$FIXTURE_ROOT/sys/class/nvram/nv-config/keys/lvds_speed_restriction"
+mkdir "$FIXTURE_ROOT/test"
+: > "$FIXTURE_ROOT/test/fail-lvds-disable"
+if run_installer install; then fail "setter failure with absent keys returned success"; fi
+assert_file_state stock "$FIXTURE_COMMON"
+assert_eq "$(nvram_value bus_bcm_speed_restriction)" enable "bus rolled back to factory"
+assert_eq "$(nvram_value lvds_speed_restriction)" enable "LVDS set to factory by rollback"
+grep -q 'rollback verified' "$FIXTURE_LOG" || fail "rollback from absent keys was not verified"
+pass "rollback after a setter failure leaves absent keys at their factory value"
+
+make_fixture nvram_key_garbage
+printf '%s\n' maybe > "$FIXTURE_ROOT/sys/class/nvram/nv-config/keys/lvds_speed_restriction"
+if run_installer install; then fail "unreadable NVRAM key was accepted"; fi
+assert_file_state stock "$FIXTURE_COMMON"
+[ ! -e "$FIXTURE_ROOT/nvram-writes" ] || fail "unreadable key led to NVRAM writes"
+grep -q "lvds_speed_restriction exists but did not read as enable or disable (got 'maybe')" "$FIXTURE_LOG" || fail "unreadable key was not diagnosed"
+pass "an existing NVRAM key with an unexpected value is still refused"
+
+make_fixture nvram_dir_missing
+rm -r "$FIXTURE_ROOT/sys/class/nvram/nv-config/keys"
+if run_installer install; then fail "missing NVRAM key directory was accepted"; fi
+assert_file_state stock "$FIXTURE_COMMON"
+grep -q 'NVRAM key directory .* is unavailable' "$FIXTURE_LOG" || fail "missing key directory was not diagnosed"
+pass "a missing NVRAM key directory is refused rather than assumed factory"
 
 make_fixture legacy_upgrade
 cp "$FIXTURE_DIR/patched.js" "$FIXTURE_COMMON"
@@ -218,7 +284,8 @@ printf '%s\n' '// latent corruption' >> "$FIXTURE_COMMON"
 if run_installer install; then fail "corrupt source was accepted"; fi
 [ ! -e "$FIXTURE_ROOT/data/touchtune/backups/common-js" ] || fail "corrupt source became a backup"
 assert_eq "$(nvram_value bus_bcm_speed_restriction)" enable "NVRAM changed for corrupt source"
-grep -q 'not an explicitly recognized source state' "$FIXTURE_LOG" || fail "corrupt source refusal was not diagnosed"
+grep -q 'neither the stock nor the TouchTune file' "$FIXTURE_LOG" || fail "corrupt source refusal was not diagnosed"
+grep -q 'sha256=' "$FIXTURE_LOG" || fail "corrupt source digest was not logged"
 pass "unknown or corrupt Common.js baseline is refused before mutation"
 
 make_fixture unsupported_firmware
@@ -328,6 +395,50 @@ assert_file_state stock "$FIXTURE_COMMON"
 assert_eq "$(nvram_value bus_bcm_speed_restriction)" enable "bus NVRAM was not rolled back after readback mismatch"
 grep -q 'NVRAM readback mismatch' "$FIXTURE_LOG" || fail "readback mismatch was not diagnosed"
 pass "successful setter exit is insufficient without matching NVRAM readback"
+
+# Mazda's setters update live keys before committing the entire NVRAM block.
+# Failed commits can leave readable values that do not match persistent storage.
+make_fixture nvram_commit_retry
+run_installer install || fail "setup install for commit failure failed"
+mkdir "$FIXTURE_ROOT/persistent"
+cp "$FIXTURE_ROOT/sys/class/nvram/nv-config/keys/"* "$FIXTURE_ROOT/persistent/"
+cat > "$FIXTURE_ROOT/jci/scripts/set_speed_restriction_config.sh" <<'EOF'
+#!/bin/sh
+case "${0##*/}" in
+    set_speed_restriction_config.sh) key=bus_bcm_speed_restriction ;;
+    set_lvds_speed_restriction_config.sh) key=lvds_speed_restriction ;;
+esac
+printf '%s\n' "$1" > "$MZD_NVRAM_DIR/keys/$key"
+count=0
+[ ! -f "$MZD_ROOT/commit-count" ] || read -r count < "$MZD_ROOT/commit-count"
+count=$((count + 1))
+printf '%s\n' "$count" > "$MZD_ROOT/commit-count"
+# Let removal's first commit succeed, then fail its second commit and rollback.
+[ "$count" -eq 1 ] || [ -f "$MZD_ROOT/allow-commits" ] || exit 47
+cp "$MZD_NVRAM_DIR/keys/"* "$MZD_ROOT/persistent/"
+EOF
+cp "$FIXTURE_ROOT/jci/scripts/set_speed_restriction_config.sh" \
+    "$FIXTURE_ROOT/jci/scripts/set_lvds_speed_restriction_config.sh"
+if run_installer uninstall; then fail "failed commits were accepted on removal"; fi
+assert_file_state patched "$FIXTURE_COMMON"
+assert_eq "$(nvram_value bus_bcm_speed_restriction)" disable "live bus after incomplete rollback"
+assert_eq "$(nvram_value lvds_speed_restriction)" disable "live LVDS after incomplete rollback"
+assert_eq "$(cat "$FIXTURE_ROOT/persistent/bus_bcm_speed_restriction")" enable "persisted bus after incomplete rollback"
+grep -q 'rollback could not be completely verified' "$FIXTURE_LOG" || fail "failed rollback commits were not reported"
+
+if run_installer install; then fail "repair accepted matching live values while commits failed"; fi
+grep -q 'NVRAM setter failed' "$FIXTURE_LOG" || fail "repair did not attempt a commit"
+if grep -q 'skipping reboot' "$FIXTURE_LOG"; then fail "failed repair requested reboot"; fi
+: > "$FIXTURE_ROOT/allow-commits"
+run_installer install || fail "repair did not recover when commits became available"
+assert_file_state patched "$FIXTURE_COMMON"
+assert_eq "$(cat "$FIXTURE_ROOT/persistent/bus_bcm_speed_restriction")" disable "repaired persisted bus"
+assert_eq "$(cat "$FIXTURE_ROOT/persistent/lvds_speed_restriction")" disable "repaired persisted LVDS"
+# Simulate boot reloading the committed block into the live keys.
+cp "$FIXTURE_ROOT/persistent/"* "$FIXTURE_ROOT/sys/class/nvram/nv-config/keys/"
+assert_eq "$(nvram_value bus_bcm_speed_restriction)" disable "repaired bus after simulated boot"
+assert_eq "$(nvram_value lvds_speed_restriction)" disable "repaired LVDS after simulated boot"
+pass "repair requires successful commits after incomplete rollback and survives simulated boot"
 
 make_fixture old_receipt
 mkdir -p "$FIXTURE_ROOT/data/touchtune/state"

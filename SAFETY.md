@@ -16,16 +16,25 @@ Firmware must be `74.00.324` or `74.00.324A`. The production profile in
 
 The full digest verifies the content, including its final registration and the
 one changed line. Runtime anchor-count and tail checks are unnecessary once
-that digest matches. File mode and ownership are checked separately.
+that digest matches.
+
+Mode and ownership are not part of the profile. Mazda installs the GUI tree as
+uid/gid 1000; units touched by earlier tools may hold a root-owned copy. Both
+carry stock content. The installer records the live file's mode, uid, and gid
+at entry and reproduces them on every replacement, including removal. 1.2.0
+asserted the bench unit's `775/0/0` and refused stock cars.
 
 ## Installation and rollback
 
 1. Verify the helper before sourcing it, then verify the complete runtime
    payload before loading the patch.
-2. Recognize the live file, read both settings, and validate or create the backup.
-3. Build one candidate beside `Common.js`, check its digest and permissions,
-   and flush it. This happens before changing NVRAM.
-4. Set and read back both settings, skipping values that already match.
+2. Recognize the live file and record its attributes. Read both settings; a
+   key Mazda has not created yet counts as its factory value, while an existing
+   key with an unexpected value is refused. Validate or create the backup.
+3. Build one candidate beside `Common.js`, check its digest and recorded
+   attributes, and flush it. This happens before changing NVRAM.
+4. Run the stock setters to commit both settings, then read them back. Matching
+   live values alone do not prove that an earlier change was saved.
 5. Rename the complete candidate over `Common.js`, flush the directory, and
    verify the live file and settings again.
 6. Finalize writes, restore the read-only root mount and watchdog, then request
@@ -77,7 +86,7 @@ After changing runtime files, regenerate the manifest and run the tests:
 ```sh
 ./tools/payload-manifest.sh --write
 ./tests/run.sh
-python3 tools/release.py package /tmp/TouchTune-1.2.0.zip
+python3 tools/release.py package /tmp/TouchTune-1.2.1.zip
 ```
 
 The host tests use disposable file trees. They cover install, repair, removal,
@@ -91,5 +100,6 @@ the stock file and original settings return. Keep the package checksum and
 results with the test report. Do not inject storage failures or cut power on
 the physical CMU; use fixtures for destructive failure cases.
 
-See the [September 9 bench report](docs/bench-validation-2026-09-09.md) for the
-tested 1.2 package and results.
+See the [September 9](docs/bench-validation-2026-09-09.md) and
+[September 22](docs/bench-validation-2026-09-22.md) bench reports for the
+tested 1.2.0 and 1.2.1 packages and results.

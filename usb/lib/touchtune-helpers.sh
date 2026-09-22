@@ -29,9 +29,12 @@ MZD_PROFILE_ID=""
 MZD_PROFILE_STOCK_SHA256=""
 MZD_PROFILE_PATCHED_SHA256=""
 MZD_PROFILE_STOCK_BYTES=""
-MZD_PROFILE_FILE_MODE=""
-MZD_PROFILE_FILE_UID=""
-MZD_PROFILE_FILE_GID=""
+# Mode and ownership of the live Common.js, recorded at entry. Mazda ships the
+# GUI tree as uid/gid 1000; earlier tools left root-owned copies. Both are
+# stock content, so TouchTune preserves whatever it finds instead of asserting.
+MZD_COMMON_MODE=""
+MZD_COMMON_UID=""
+MZD_COMMON_GID=""
 MZD_PROFILE_FACTORY_BUS="enable"
 MZD_PROFILE_FACTORY_LVDS="enable"
 
@@ -77,9 +80,6 @@ mzd_select_profile() {
             MZD_PROFILE_STOCK_SHA256="376b30a46366a543122956d7feb1b44f147425015837a4d83fedf12a67943351"
             MZD_PROFILE_PATCHED_SHA256="019eba18e8d629ddb1d55563aab138ce1eb3329fab67b71d9b4178377cf9d9ce"
             MZD_PROFILE_STOCK_BYTES="98348"
-            MZD_PROFILE_FILE_MODE="775"
-            MZD_PROFILE_FILE_UID="0"
-            MZD_PROFILE_FILE_GID="0"
             ;;
         *) return 1 ;;
     esac
@@ -89,9 +89,6 @@ mzd_select_profile() {
         MZD_PROFILE_STOCK_SHA256="$TOUCHTUNE_TEST_STOCK_SHA256"
         MZD_PROFILE_PATCHED_SHA256="${TOUCHTUNE_TEST_PATCHED_SHA256:?}"
         MZD_PROFILE_STOCK_BYTES="${TOUCHTUNE_TEST_STOCK_BYTES:?}"
-        MZD_PROFILE_FILE_MODE="${TOUCHTUNE_TEST_FILE_MODE:?}"
-        MZD_PROFILE_FILE_UID="${TOUCHTUNE_TEST_FILE_UID:?}"
-        MZD_PROFILE_FILE_GID="${TOUCHTUNE_TEST_FILE_GID:?}"
     fi
     return 0
 }
@@ -133,6 +130,20 @@ mzd_bytes() {
 mzd_mode() { stat -c '%a' "$1" 2>/dev/null || stat -f '%Lp' "$1" 2>/dev/null; }
 mzd_uid() { stat -c '%u' "$1" 2>/dev/null || stat -f '%u' "$1" 2>/dev/null; }
 mzd_gid() { stat -c '%g' "$1" 2>/dev/null || stat -f '%g' "$1" 2>/dev/null; }
+mzd_describe_attrs() { printf 'mode=%s uid=%s gid=%s\n' "$(mzd_mode "$1")" "$(mzd_uid "$1")" "$(mzd_gid "$1")"; }
+mzd_describe_common() { printf 'sha256=%s bytes=%s %s\n' "$(mzd_sha256 "$1")" "$(mzd_bytes "$1")" "$(mzd_describe_attrs "$1")"; }
+
+# Record the live file's mode and ownership so every replacement reproduces them.
+mzd_record_common_attrs() {
+    local path="$1" mode uid gid
+    mode=$(mzd_mode "$path") && uid=$(mzd_uid "$path") && gid=$(mzd_gid "$path") || return 1
+    case "$mode" in [0-7][0-7][0-7]|[0-7][0-7][0-7][0-7]) ;; *) return 1 ;; esac
+    case "$uid" in ''|*[!0-9]*) return 1 ;; esac
+    case "$gid" in ''|*[!0-9]*) return 1 ;; esac
+    MZD_COMMON_MODE=$mode
+    MZD_COMMON_UID=$uid
+    MZD_COMMON_GID=$gid
+}
 
 mzd_fsync_file() {
     if [ -n "$MZD_FSYNC" ] && [ -x "$MZD_FSYNC" ]; then
@@ -186,18 +197,23 @@ mzd_common_state() {
     case "$digest" in
         "$MZD_PROFILE_STOCK_SHA256") printf '%s\n' stock ;;
         "$MZD_PROFILE_PATCHED_SHA256") printf '%s\n' patched ;;
-        *) mzd_log "ERROR: unrecognized Common.js (sha256=$digest); refusing to modify it"; return 1 ;;
+        *)
+            mzd_log "ERROR: Common.js is neither the stock nor the TouchTune file for $MZD_SUPPORTED_BASE_FW (sha256=$digest); TouchTune only replaces files it recognizes"
+            return 1
+            ;;
     esac
 }
 
 mzd_validate_common() { [ "$(mzd_common_state "$1")" = "$2" ]; }
 
+# Exact content plus the mode and ownership recorded from the live file.
 mzd_validate_target_common() {
     local path="$1" wanted="$2"
+    [ -n "$MZD_COMMON_MODE" ] && [ -n "$MZD_COMMON_UID" ] && [ -n "$MZD_COMMON_GID" ] || return 1
     mzd_validate_common "$path" "$wanted" || return 1
-    [ "$(mzd_mode "$path")" = "$MZD_PROFILE_FILE_MODE" ] || return 1
-    [ "$(mzd_uid "$path")" = "$MZD_PROFILE_FILE_UID" ] || return 1
-    [ "$(mzd_gid "$path")" = "$MZD_PROFILE_FILE_GID" ] || return 1
+    [ "$(mzd_mode "$path")" = "$MZD_COMMON_MODE" ] || return 1
+    [ "$(mzd_uid "$path")" = "$MZD_COMMON_UID" ] || return 1
+    [ "$(mzd_gid "$path")" = "$MZD_COMMON_GID" ] || return 1
 }
 
 mzd_transform_common() {
@@ -424,11 +440,11 @@ mzd_stage_common() {
         patched) mzd_transform_common "$MZD_COMMON_BACKUP_FILE" "$candidate" install || return 1 ;;
         *) return 1 ;;
     esac
-    chmod "$MZD_PROFILE_FILE_MODE" "$candidate" || return 1
-    chown "$MZD_PROFILE_FILE_UID:$MZD_PROFILE_FILE_GID" "$candidate" || return 1
+    chmod "$MZD_COMMON_MODE" "$candidate" || return 1
+    chown "$MZD_COMMON_UID:$MZD_COMMON_GID" "$candidate" || return 1
     mzd_fault truncate-common-candidate "$candidate"
     if ! mzd_validate_target_common "$candidate" "$wanted"; then
-        mzd_log "ERROR: staged Common.js failed exact content or permissions validation"
+        mzd_log "ERROR: staged Common.js failed validation; wanted exact $wanted content with mode=$MZD_COMMON_MODE uid=$MZD_COMMON_UID gid=$MZD_COMMON_GID, got $(mzd_describe_common "$candidate")"
         return 1
     fi
     mzd_fault common-fsync-failure "$candidate" || return 1
@@ -447,7 +463,7 @@ mzd_publish_common() {
     mzd_fault interrupt-after-common-rename "$MZD_COMMON_TARGET"
     mzd_fault corrupt-common-after-rename "$MZD_COMMON_TARGET"
     if ! mzd_validate_target_common "$MZD_COMMON_TARGET" "$wanted"; then
-        mzd_log "ERROR: published Common.js failed readback validation"
+        mzd_log "ERROR: published Common.js failed readback validation; wanted exact $wanted content with mode=$MZD_COMMON_MODE uid=$MZD_COMMON_UID gid=$MZD_COMMON_GID, got $(mzd_describe_common "$MZD_COMMON_TARGET")"
         return 1
     fi
     mzd_log "published and read back exact $wanted Common.js"
@@ -459,6 +475,33 @@ mzd_read_nvram() {
         [ -r "$MZD_NVRAM_DIR/keys/$key" ] || return 1
     value=$(tr -d '\r\n' < "$MZD_NVRAM_DIR/keys/$key") || return 1
     case "$value" in enable|disable) printf '%s\n' "$value" ;; *) return 1 ;; esac
+}
+
+# True when Mazda has not created this key yet. The stock setters create missing
+# keys, so a missing key is the factory state, not an unreadable one.
+mzd_nvram_key_absent() {
+    local key="$1"
+    mzd_require_real_dir "$MZD_NVRAM_DIR/keys" || return 1
+    [ ! -e "$MZD_NVRAM_DIR/keys/$key" ] && [ ! -L "$MZD_NVRAM_DIR/keys/$key" ]
+}
+
+mzd_nvram_factory_value() {
+    case "$1" in
+        bus_bcm_speed_restriction) printf '%s\n' "$MZD_PROFILE_FACTORY_BUS" ;;
+        lvds_speed_restriction) printf '%s\n' "$MZD_PROFILE_FACTORY_LVDS" ;;
+        *) return 1 ;;
+    esac
+}
+
+# Current value, or the factory value while the key has not been created yet.
+mzd_read_nvram_or_factory() {
+    local key="$1" value
+    if value=$(mzd_read_nvram "$key"); then
+        printf '%s\n' "$value"
+        return 0
+    fi
+    mzd_nvram_key_absent "$key" || return 1
+    mzd_nvram_factory_value "$key"
 }
 
 mzd_nvram_setter() {
@@ -485,8 +528,8 @@ mzd_require_nvram_setters() {
 mzd_set_nvram() {
     local key="$1" wanted="$2" setter actual
     case "$wanted" in enable|disable) ;; *) return 1 ;; esac
-    actual=$(mzd_read_nvram "$key") || actual=
-    [ "$actual" != "$wanted" ] || return 0
+    # Live keys reflect memory even when a prior commit failed. Always run the
+    # stock setter so matching values still require a successful commit.
     setter=$(mzd_nvram_setter "$key") || return 1
     [ -x "$setter" ] || { mzd_log "ERROR: required NVRAM setter is missing: $setter"; return 1; }
     if ! "$setter" "$wanted"; then
@@ -513,7 +556,7 @@ mzd_set_touch_nvram() {
 
 mzd_touchtune_installed() {
     [ -n "$MZD_PROFILE_PATCHED_SHA256" ] || return 1
-    mzd_validate_target_common "$MZD_COMMON_TARGET" patched
+    mzd_validate_common "$MZD_COMMON_TARGET" patched 2>/dev/null
 }
 
 mzd_choose_action() {

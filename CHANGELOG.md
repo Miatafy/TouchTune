@@ -1,5 +1,23 @@
 # Changelog
 
+## 1.2.1 (2026-09-22)
+
+- Keep the mode and ownership of the `Common.js` found on the CMU instead of
+  requiring the bench unit's values. Mazda ships the GUI tree as uid/gid 1000;
+  1.2.0 refused those units with "Common.js permissions do not match the
+  supported profile" before changing anything. Replacements and removals now
+  reproduce whatever attributes the live file had.
+- Treat a speed-restriction NVRAM key that Mazda has not created yet as its
+  factory value. The stock setters create the key. An existing key with an
+  unexpected value is still refused. Diagnosis and field test by
+  Davide Maieron (dogengineer), GitHub issue #3.
+- Always commit the requested NVRAM settings, including on repair. A matching
+  live value can outlast a failed save; it must not bypass another commit.
+- Log what was found when a check fails: the recognized state, digest, mode,
+  and ownership of `Common.js`, and the value of an unreadable NVRAM key.
+- Test attribute inheritance, absent and malformed NVRAM keys, and failed
+  commits with separate live and saved values.
+
 ## 1.2.0 (2026-09-09)
 
 - Replace the in-place edit with one complete, flushed replacement, checked
