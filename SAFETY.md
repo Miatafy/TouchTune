@@ -103,3 +103,29 @@ the physical CMU; use fixtures for destructive failure cases.
 See the [September 9](docs/bench-validation-2026-09-09.md) and
 [September 22](docs/bench-validation-2026-09-22.md) bench reports for the
 tested 1.2.0 and 1.2.1 packages and results.
+
+## Publishing a release
+
+Users install from the release ZIP, so every version needs a GitHub release.
+Publish the exact package that passed the bench; its SHA-256 must match the
+one recorded in the bench report. Releases before 1.2.1 were published only
+as commits on `main`.
+
+1. Bump `VERSION` and `usb/VERSION`, update `usb/SOURCE.txt`, the README
+   badge, and `CHANGELOG.md`, then run the development checks above.
+2. Build the package, bench-test it, and record its checksum in
+   `docs/bench-validation-YYYY-MM-DD.md`.
+3. Commit, then push `main`.
+4. Rebuild the package and confirm its checksum still matches the bench
+   report. `tools/release.py` builds byte-identical packages.
+5. Publish the tag and release with the ZIP attached. Use that version's
+   `CHANGELOG.md` entry as the notes, then add the package SHA-256 and an
+   absolute link to the bench report. Relative links do not resolve on the
+   release page.
+
+```sh
+python3 tools/release.py package /tmp/TouchTune-X.Y.Z.zip
+shasum -a 256 /tmp/TouchTune-X.Y.Z.zip
+gh release create vX.Y.Z /tmp/TouchTune-X.Y.Z.zip -R Miatafy/TouchTune \
+    --target main --title "TouchTune X.Y.Z" --notes-file notes.md
+```
